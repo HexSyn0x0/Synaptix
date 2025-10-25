@@ -1,0 +1,14 @@
+{
+  "name": "synaptix",
+  "version": "1.0.0",
+  "description": "Synaptix DEX - a decentralized DePIN-powered exchange on Ethereum",
+  "scripts": {
+    "test": "npx hardhat test",
+    "compile": "npx hardhat compile",
+    "deploy": "npx hardhat run scripts/deploy.js --network sepolia"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "dotenv": "^16.0.0"
+  }
+}
