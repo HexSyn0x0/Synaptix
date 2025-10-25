@@ -35,3 +35,13 @@ Synaptix uses a **DePIN architecture**, where distributed nodes perform off-chai
 npm install
 npx hardhat compile
 npx hardhat test
+
+
+
+REPOSITORY STRUCTURE
+
+contracts/       → Smart contracts (Solidity)
+test/            → Unit & integration tests
+scripts/         → Deployment & verification scripts
+docs/            → Whitepaper, architecture diagrams
+frontend/        → Website (static or React version)
