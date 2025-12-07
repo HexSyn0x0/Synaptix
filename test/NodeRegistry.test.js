@@ -12,7 +12,8 @@ describe("NodeRegistry", function () {
     await token.deployed();
 
     const NodeRegistry = await ethers.getContractFactory("NodeRegistry");
-    registry = await NodeRegistry.deploy(token.address, 100);
+    const minStake = 100;
+    registry = await NodeRegistry.deploy(token.address, minStake, 3600, 100, 250); // complete constructor
     await registry.deployed();
 
     await token.transfer(user.address, 500);
@@ -20,13 +21,15 @@ describe("NodeRegistry", function () {
 
   it("user can register node", async function () {
     await token.connect(user).approve(registry.address, 100);
-    await registry.connect(user).registerNode();
-    const nodeInfo = await registry.nodes(user.address);
-    expect(nodeInfo.isActive).to.be.true;
+    await registry.connect(user).registerNode(100);
+
+    const nodeInfo = await registry.getNode(user.address);
+    expect(nodeInfo.status).to.equal(1); // NodeStatus.Active
+    expect(nodeInfo.stakedAmount).to.equal(100);
   });
 
   it("cannot register node without minimum stake", async function () {
     await token.connect(user).approve(registry.address, 50);
-    await expect(registry.connect(user).registerNode()).to.be.reverted;
+    await expect(registry.connect(user).registerNode(50)).to.be.revertedWith("stake below minimum");
   });
 });
