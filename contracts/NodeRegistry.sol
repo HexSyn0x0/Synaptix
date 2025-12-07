@@ -1,33 +1,44 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/**
- * @title NodeRegistry
- * @notice Advanced DePIN node management for Synaptix (SYNX)
- * @dev Roles: DEFAULT_ADMIN_ROLE (governance), SLASHER_ROLE (punish), PAUSER_ROLE (pause).
- *      Features: staking, increase stake, withdrawal request + delay, partial withdrawal,
- *      slashing with multiplier, reputation, node list, network parameter updates, reentrancy guard.
- */
-
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
+/**
+ * @title NodeRegistry
+ * @notice Node management contract for staking, rewards, heartbeat, slashing, and governance
+ * @dev Roles:
+ *      DEFAULT_ADMIN_ROLE - network governance
+ *      SLASHER_ROLE - slashing misbehaving nodes
+ *      PAUSER_ROLE - pause/unpause contract in emergencies
+ */
 contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
+    // ---------------------
+    // Roles
+    // ---------------------
     bytes32 public constant SLASHER_ROLE = keccak256("SLASHER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
+    // ---------------------
+    // Network parameters
+    // ---------------------
     IERC20 public immutable stakingToken;
     uint256 public minimumStake;
-    uint256 public withdrawalDelay;          // seconds
+    uint256 public withdrawalDelay;          
     uint256 public maxReputation;
-    uint256 public slashPenaltyMultiplier;   // e.g. 250 => 2.5% if divisor is 10000
+    uint256 public slashPenaltyMultiplier;   
     uint256 public constant SLASH_DIVISOR = 10000;
+    uint256 public heartbeatInterval;
+    uint256 public partialWithdrawalCooldown;
 
+    // ---------------------
+    // Node data structures
+    // ---------------------
     enum NodeStatus { None, Active, CoolingDown, Inactive, Banned }
 
     struct Node {
@@ -35,20 +46,24 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
         uint256 reputation;
         uint256 registeredAt;
         uint256 lastRewardAt;
-        uint256 withdrawUnlockTime; // timestamp when stake can be withdrawn
+        uint256 withdrawUnlockTime;
+        uint256 lastHeartbeat;
+        uint256 lastPartialWithdrawal;
         NodeStatus status;
         bool exists;
     }
 
-    // Storage
     mapping(address => Node) private nodes;
     address[] private nodeList;
-    mapping(address => uint256) private nodeIndex; // 1-based index into nodeList for gas-efficient checks
+    mapping(address => uint256) private nodeIndex;
 
+    // ---------------------
     // Events
+    // ---------------------
     event NodeRegistered(address indexed node, uint256 stake);
     event StakeIncreased(address indexed node, uint256 amount);
     event WithdrawalRequested(address indexed node, uint256 unlockTime);
+    event PartialWithdrawalRequested(address indexed node, uint256 amount, uint256 unlockTime);
     event StakeWithdrawn(address indexed node, uint256 amount);
     event NodeSlashed(address indexed node, uint256 amountSlashed, uint256 newReputation);
     event NodeStatusUpdated(address indexed node, NodeStatus newStatus);
@@ -57,17 +72,25 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
         uint256 minimumStake,
         uint256 withdrawalDelay,
         uint256 maxReputation,
-        uint256 slashPenaltyMultiplier
+        uint256 slashPenaltyMultiplier,
+        uint256 heartbeatInterval,
+        uint256 partialWithdrawalCooldown
     );
     event NodeRemoved(address indexed node);
+    event RewardDistributed(address indexed node, uint256 amount);
+    event Heartbeat(address indexed node, uint256 timestamp);
 
+    // ---------------------
     // Constructor
+    // ---------------------
     constructor(
         address _stakingToken,
         uint256 _minimumStake,
         uint256 _withdrawalDelay,
         uint256 _maxReputation,
-        uint256 _slashPenaltyMultiplier
+        uint256 _slashPenaltyMultiplier,
+        uint256 _heartbeatInterval,
+        uint256 _partialWithdrawalCooldown
     ) {
         require(_stakingToken != address(0), "zero token");
         require(_maxReputation > 0, "invalid maxRep");
@@ -77,16 +100,23 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
         withdrawalDelay = _withdrawalDelay;
         maxReputation = _maxReputation;
         slashPenaltyMultiplier = _slashPenaltyMultiplier;
+        heartbeatInterval = _heartbeatInterval;
+        partialWithdrawalCooldown = _partialWithdrawalCooldown;
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(PAUSER_ROLE, msg.sender);
     }
 
     // ---------------------
-    // Modifiers / helpers
+    // Modifiers
     // ---------------------
     modifier onlyExisting(address nodeAddr) {
         require(nodes[nodeAddr].exists, "node not registered");
+        _;
+    }
+
+    modifier onlyActive(address nodeAddr) {
+        require(nodes[nodeAddr].status == NodeStatus.Active, "node not active");
         _;
     }
 
@@ -94,30 +124,30 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
     // Node lifecycle
     // ---------------------
     function registerNode(uint256 amount) external whenNotPaused nonReentrant {
-        require(amount >= minimumStake, "stake below minimum");
         Node storage n = nodes[msg.sender];
         require(!n.exists, "already registered");
+        require(amount >= minimumStake, "stake below minimum");
 
-        // transfer first to avoid reentrancy vector (safeTransferFrom will call ERC20)
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
 
         n.stakedAmount = amount;
-        n.reputation = maxReputation / 2; // start at 50% of max
+        n.reputation = maxReputation / 2;
         n.registeredAt = block.timestamp;
         n.lastRewardAt = block.timestamp;
+        n.lastHeartbeat = block.timestamp;
         n.status = NodeStatus.Active;
         n.exists = true;
 
         nodeList.push(msg.sender);
-        nodeIndex[msg.sender] = nodeList.length; // 1-based
+        nodeIndex[msg.sender] = nodeList.length;
 
         emit NodeRegistered(msg.sender, amount);
     }
 
     function increaseStake(uint256 amount) external whenNotPaused nonReentrant onlyExisting(msg.sender) {
-        require(amount > 0, "zero amount");
         Node storage n = nodes[msg.sender];
         require(n.status != NodeStatus.Banned, "node banned");
+        require(amount > 0, "zero amount");
 
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
         n.stakedAmount += amount;
@@ -125,10 +155,8 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
         emit StakeIncreased(msg.sender, amount);
     }
 
-    // Request withdrawal -> sets CoolingDown and unlock time
-    function requestWithdrawal() external whenNotPaused nonReentrant onlyExisting(msg.sender) {
+    function requestWithdrawal() external whenNotPaused nonReentrant onlyActive(msg.sender) {
         Node storage n = nodes[msg.sender];
-        require(n.status == NodeStatus.Active, "not active");
         n.status = NodeStatus.CoolingDown;
         n.withdrawUnlockTime = block.timestamp + withdrawalDelay;
 
@@ -136,48 +164,66 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
         emit NodeStatusUpdated(msg.sender, NodeStatus.CoolingDown);
     }
 
-    // Withdraw full stake after cooldown
+    function requestPartialWithdrawal(uint256 amount) external whenNotPaused nonReentrant onlyActive(msg.sender) {
+        Node storage n = nodes[msg.sender];
+        require(amount > 0 && amount <= n.stakedAmount, "invalid amount");
+        require(block.timestamp >= n.lastPartialWithdrawal + partialWithdrawalCooldown, "cooldown active");
+
+        n.stakedAmount -= amount;
+        n.lastPartialWithdrawal = block.timestamp;
+        stakingToken.safeTransfer(msg.sender, amount);
+
+        emit PartialWithdrawalRequested(msg.sender, amount, block.timestamp + partialWithdrawalCooldown);
+    }
+
     function withdrawStake() external nonReentrant onlyExisting(msg.sender) {
         Node storage n = nodes[msg.sender];
         require(n.status == NodeStatus.CoolingDown, "not cooling down");
         require(block.timestamp >= n.withdrawUnlockTime, "cooldown active");
 
         uint256 amount = n.stakedAmount;
-        require(amount > 0, "no stake");
-
-        // reset node
         n.stakedAmount = 0;
         n.status = NodeStatus.Inactive;
         n.exists = false;
 
-        // remove from nodeList efficiently: swap & pop
         _removeNodeFromList(msg.sender);
-
         stakingToken.safeTransfer(msg.sender, amount);
 
         emit StakeWithdrawn(msg.sender, amount);
         emit NodeStatusUpdated(msg.sender, NodeStatus.Inactive);
     }
 
-    // Allow partial withdrawal by governance (optional utility)
-    function adminForceWithdraw(address nodeAddr, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant onlyExisting(nodeAddr) {
+    // ---------------------
+    // Rewards Engine
+    // ---------------------
+    function distributeRewards(address nodeAddr, uint256 rewardAmount) external onlyRole(DEFAULT_ADMIN_ROLE) onlyActive(nodeAddr) {
         Node storage n = nodes[nodeAddr];
-        require(amount <= n.stakedAmount, "amount > stake");
-
-        n.stakedAmount -= amount;
-        stakingToken.safeTransfer(msg.sender /* admin */, amount);
-
-        emit StakeWithdrawn(nodeAddr, amount);
+        n.lastRewardAt = block.timestamp;
+        stakingToken.safeTransfer(nodeAddr, rewardAmount);
+        emit RewardDistributed(nodeAddr, rewardAmount);
     }
 
     // ---------------------
-    // Slashing & reputation
+    // Node Monitoring / Heartbeat
+    // ---------------------
+    function sendHeartbeat() external onlyActive(msg.sender) {
+        Node storage n = nodes[msg.sender];
+        n.lastHeartbeat = block.timestamp;
+        emit Heartbeat(msg.sender, block.timestamp);
+    }
+
+    function checkHeartbeat(address nodeAddr) external view onlyExisting(nodeAddr) returns (bool) {
+        Node storage n = nodes[nodeAddr];
+        return (block.timestamp - n.lastHeartbeat) <= heartbeatInterval;
+    }
+
+    // ---------------------
+    // Slashing & Reputation
     // ---------------------
     function slashNode(address nodeAddr, uint256 baseAmount) external onlyRole(SLASHER_ROLE) nonReentrant onlyExisting(nodeAddr) {
         Node storage n = nodes[nodeAddr];
         require(n.status != NodeStatus.Banned, "already banned");
 
-        // compute penalty
         uint256 penalty = (baseAmount * slashPenaltyMultiplier) / SLASH_DIVISOR;
         uint256 totalSlash = baseAmount + penalty;
 
@@ -189,14 +235,12 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
             n.stakedAmount -= totalSlash;
         }
 
-        // degrade reputation safely
         uint256 oldRep = n.reputation;
         if (n.reputation > 0) {
-            uint256 decrease = 10; // fixed or could be param
+            uint256 decrease = 10;
             n.reputation = (n.reputation > decrease) ? n.reputation - decrease : 0;
         }
 
-        // slashed amount goes to slasher (or to treasury depending on design)
         stakingToken.safeTransfer(msg.sender, totalSlash);
 
         emit NodeSlashed(nodeAddr, totalSlash, n.reputation);
@@ -212,7 +256,7 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
     }
 
     // ---------------------
-    // Governance / admin
+    // Governance / Admin
     // ---------------------
     function changeNodeStatus(address nodeAddr, NodeStatus newStatus) external onlyRole(DEFAULT_ADMIN_ROLE) onlyExisting(nodeAddr) {
         nodes[nodeAddr].status = newStatus;
@@ -223,41 +267,34 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
         uint256 _minimumStake,
         uint256 _withdrawalDelay,
         uint256 _maxReputation,
-        uint256 _slashPenaltyMultiplier
+        uint256 _slashPenaltyMultiplier,
+        uint256 _heartbeatInterval,
+        uint256 _partialWithdrawalCooldown
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         minimumStake = _minimumStake;
         withdrawalDelay = _withdrawalDelay;
         maxReputation = _maxReputation;
         slashPenaltyMultiplier = _slashPenaltyMultiplier;
+        heartbeatInterval = _heartbeatInterval;
+        partialWithdrawalCooldown = _partialWithdrawalCooldown;
 
-        emit NetworkParametersUpdated(_minimumStake, _withdrawalDelay, _maxReputation, _slashPenaltyMultiplier);
+        emit NetworkParametersUpdated(
+            _minimumStake, _withdrawalDelay, _maxReputation, _slashPenaltyMultiplier, _heartbeatInterval, _partialWithdrawalCooldown
+        );
     }
 
-    function pause() external onlyRole(PAUSER_ROLE) {
-        _pause();
-    }
-
-    function unpause() external onlyRole(PAUSER_ROLE) {
-        _unpause();
-    }
+    function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
+    function unpause() external onlyRole(PAUSER_ROLE) { _unpause(); }
 
     // ---------------------
-    // Views / utils
+    // Views / Utils
     // ---------------------
-    function getNode(address nodeAddr) external view onlyExisting(nodeAddr) returns (Node memory) {
-        return nodes[nodeAddr];
-    }
-
-    function getAllNodes() external view returns (address[] memory) {
-        return nodeList;
-    }
-
-    function isNode(address addr) external view returns (bool) {
-        return nodes[addr].exists;
-    }
+    function getNode(address nodeAddr) external view onlyExisting(nodeAddr) returns (Node memory) { return nodes[nodeAddr]; }
+    function getAllNodes() external view returns (address[] memory) { return nodeList; }
+    function isNode(address addr) external view returns (bool) { return nodes[addr].exists; }
 
     // ---------------------
-    // Internal helpers
+    // Internal Helpers
     // ---------------------
     function _removeNodeFromList(address nodeAddr) internal {
         uint256 idx = nodeIndex[nodeAddr];
@@ -266,10 +303,9 @@ contract NodeRegistry is AccessControl, ReentrancyGuard, Pausable {
         uint256 index0 = idx - 1;
 
         if (index0 != listLen - 1) {
-            // swap with last
             address last = nodeList[listLen - 1];
             nodeList[index0] = last;
-            nodeIndex[last] = idx; // moved to idx (1-based)
+            nodeIndex[last] = idx;
         }
 
         nodeList.pop();
