@@ -16,11 +16,14 @@ To create a fully decentralized financial ecosystem where liquidity, computation
 - **SynaptixDEX.sol** → Automated Market Maker (AMM) and trading core
 - **Utils.sol** → Math and shared library functions
 
-## 💰 Tokenomics
-- Total Supply: **10,000,000 SYNX**
-- Circulating at Launch: **45%**
-- Node & Reward Allocation: **40%**
-- Team & Treasury: **15%**
+💰 Tokenomics
+
+Total Supply: 100,000,000 SYNX
+Presale: 60%
+Liquidity: 15%
+Team & Partnerships: 5%
+Node Rewards: 20%
+SYNX is a fixed-supply token; no minting after deployment.
 
 ## 🧠 Architecture
 Synaptix uses a **DePIN architecture**, where distributed nodes perform off-chain validation, aggregation, and routing tasks while maintaining a verifiable on-chain record.
