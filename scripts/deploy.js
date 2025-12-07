@@ -10,52 +10,72 @@ async function main() {
   const [deployer] = await ethers.getSigners();
   console.log("Deploying with:", deployer.address);
 
+  // ---------------------
   // 1) Deploy SynaptixToken
+  // ---------------------
   const Token = await ethers.getContractFactory("SynaptixToken");
-  const token = await Token.deploy();
+
+  // Placeholder wallets (da sostituire con wallet reali)
+  const presaleWallet = deployer.address;
+  const liquidityWallet = deployer.address;
+  const teamWallet = deployer.address;
+  const nodeRewardsWallet = deployer.address;
+
+  const token = await Token.deploy(
+    presaleWallet,
+    liquidityWallet,
+    teamWallet,
+    nodeRewardsWallet
+  );
   await token.deployed();
   console.log("SynaptixToken deployed at:", token.address);
 
-  // 2) Deploy StakingRewards (use token as staking & reward for now)
+  // ---------------------
+  // 2) Deploy StakingRewards
+  // ---------------------
   const Staking = await ethers.getContractFactory("StakingRewards");
-  const staking = await Staking.deploy(token.address, token.address, 0); // rewardRate initially 0
+
+  // Reward rate iniziale = 0 (da aggiornare dopo)
+  const rewardRate = 0;
+
+  const staking = await Staking.deploy(token.address, token.address, rewardRate);
   await staking.deployed();
   console.log("StakingRewards deployed at:", staking.address);
 
-  // 3) Deploy NodeRegistry (minStake example: 100 SYNX)
+  // ---------------------
+  // 3) Deploy NodeRegistry
+  // ---------------------
   const NodeRegistry = await ethers.getContractFactory("NodeRegistry");
-  const minStake = ethers.utils.parseUnits("100", 18);
-  const registry = await NodeRegistry.deploy(token.address, minStake);
+
+  const minStake = ethers.utils.parseUnits("100", 18);   // esempio: 100 SYNX min stake
+  const withdrawalDelay = 86400;                          // 1 giorno in secondi
+  const maxReputation = 100;
+  const slashPenaltyMultiplier = 250;                    // 2.5% se divisore = 10000
+
+  const registry = await NodeRegistry.deploy(
+    token.address,
+    minStake,
+    withdrawalDelay,
+    maxReputation,
+    slashPenaltyMultiplier
+  );
   await registry.deployed();
   console.log("NodeRegistry deployed at:", registry.address);
 
-  // 4) Deploy SynaptixDEX (proto)
+  // ---------------------
+  // 4) Deploy SynaptixDEX
+  // ---------------------
   const Dex = await ethers.getContractFactory("SynaptixDEX");
-  // tokenA & tokenB: for prototype, we pass the same token (SYNX)
+
+  // Per prototipo, usiamo SYNX come tokenA e tokenB
   const dex = await Dex.deploy(token.address, token.address);
   await dex.deployed();
   console.log("SynaptixDEX deployed at:", dex.address);
-
-  // 5) Bootstrap token distribution (example values)
-  const totalSupply = await token.totalSupply();
-  console.log("Total supply:", ethers.utils.formatUnits(totalSupply, 18));
-
-  // send some tokens to staking contract (e.g., 1_000_000 SYNX)
-  const toStaking = ethers.utils.parseUnits("1000000", 18);
-  await token.transfer(staking.address, toStaking);
-  console.log("Transferred to StakingRewards:", ethers.utils.formatUnits(toStaking, 18));
-
-  // send some tokens to DEX for liquidity (e.g., 500_000 SYNX)
-  const toDex = ethers.utils.parseUnits("500000", 18);
-  await token.transfer(dex.address, toDex);
-  console.log("Transferred to Dex:", ethers.utils.formatUnits(toDex, 18));
-
-  console.log("Deployment finished.");
 }
 
 main()
   .then(() => process.exit(0))
-  .catch((error) => {
+  .catch(error => {
     console.error(error);
-    process.exitCode = 1;
+    process.exit(1);
   });
